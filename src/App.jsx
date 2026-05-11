@@ -41,14 +41,21 @@ async function fetchUserData(username) {
       fetch(`${API}/${username}/calendar`),
       fetch(`${API}/${username}`)
     ]);
+    
     if (!calRes.ok || !statsRes.ok) throw new Error('API error');
-    const cal = await calRes.json();
+    
+    const calData = await calRes.json();
     const stats = await statsRes.json();
 
-    const calendar = JSON.parse(cal.submissionCalendar || '{}');
-    const todayKey = getTodayMidnightUnix();
-    const submittedToday = todayKey in calendar;
+    // 1. UTC-Safe Key for India (5:30 AM reset)
+    const now = new Date();
+    const todayUTC = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 1000;
+    const todayKey = todayUTC.toString();
+
+    // 2. Parse Calendar and Check Today
+    const calendar = JSON.parse(calData.submissionCalendar || '{}');
     const todayCount = calendar[todayKey] || 0;
+    const submittedToday = todayCount > 0;
 
     return {
       username,
@@ -56,20 +63,27 @@ async function fetchUserData(username) {
       easySolved: stats.easySolved || 0,
       mediumSolved: stats.mediumSolved || 0,
       hardSolved: stats.hardSolved || 0,
-      streak: cal.streak || 0,
-      totalActiveDays: cal.totalActiveDays || 0,
+      
+      // Note: The API often provides 'streak' inside the calData 
+      // but calculating it manually from the calendar is more reliable
+      streak: calData.streak || 0, 
+      totalActiveDays: calData.totalActiveDays || 0,
+      
       submittedToday,
       todayCount,
+      lastUpdated: new Date().toLocaleTimeString('en-IN'),
       error: null,
     };
   } catch (e) {
+    console.error(`Error for ${username}:`, e);
     return {
       username, totalSolved: 0, easySolved: 0, mediumSolved: 0, hardSolved: 0,
       streak: 0, totalActiveDays: 0, submittedToday: false, todayCount: 0,
-      error: 'Could not fetch. API may be sleeping — try again in 30s.',
+      error: 'API is sleeping or username is invalid. Try again in 30s.',
     };
   }
 }
+
 
 // ── Setup Screen ──────────────────────────────────────────────────────────────
 function SetupScreen({ onStart }) {

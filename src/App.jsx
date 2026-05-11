@@ -39,7 +39,7 @@ async function fetchUserData(username) {
   try {
     const [calRes, statsRes] = await Promise.all([
       fetch(`${API}/${username}/calendar`),
-      fetch(`${API}/${username}`)
+      fetch(`${API}/${username}/solved`)
     ]);
     
     if (!calRes.ok || !statsRes.ok) throw new Error('API error');
@@ -59,7 +59,7 @@ async function fetchUserData(username) {
 
     return {
       username,
-      totalSolved: stats.totalSolved || 0,
+      totalSolved: stats.solvedProblem || 0,
       easySolved: stats.easySolved || 0,
       mediumSolved: stats.mediumSolved || 0,
       hardSolved: stats.hardSolved || 0,

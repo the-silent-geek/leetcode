@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { db } from './firebase';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 
 const API = 'https://alfa-leetcode-api.onrender.com';
 const STORAGE_KEY = 'lc_grind_state';
@@ -8,10 +10,19 @@ const AVATAR_COLORS = [
   { bg: 'var(--orange-bg)', color: '#fb923c' },
 ];
 
-function getTodayMidnightUnix() {
+function getTodayDateString() {
   const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return Math.floor(d.getTime() / 1000).toString();
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+function getYesterdayUTCKey() {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - 1);
+  return (Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) / 1000).toString();
+}
+
+function getGroupId(users) {
+  return [...users].sort().join('_').toLowerCase();
 }
 
 function formatDate() {
@@ -35,24 +46,58 @@ function saveToStorage(state) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
 }
 
+async function loadFromFirebase(groupId) {
+  if (!db) return null;
+  try {
+    const snap = await getDoc(doc(db, 'groups', groupId));
+    return snap.exists() ? snap.data() : null;
+  } catch (e) {
+    console.error('Firebase load error:', e);
+    return null;
+  }
+}
+
+async function saveToFirebase(groupId, data) {
+  if (!db) return;
+  try {
+    await setDoc(doc(db, 'groups', groupId), data, { merge: true });
+  } catch (e) {
+    console.error('Firebase save error:', e);
+  }
+}
+
+// Returns boolean[] — true means user missed yesterday
+async function checkYesterdayMisses(users) {
+  const yesterdayKey = getYesterdayUTCKey();
+  return Promise.all(users.map(async (username) => {
+    try {
+      const res = await fetch(`${API}/${username}/calendar`);
+      if (!res.ok) return false;
+      const calData = await res.json();
+      const calendar = JSON.parse(calData.submissionCalendar || '{}');
+      return !(calendar[yesterdayKey] > 0);
+    } catch {
+      return false;
+    }
+  }));
+}
+
 async function fetchUserData(username) {
   try {
     const [calRes, statsRes] = await Promise.all([
       fetch(`${API}/${username}/calendar`),
       fetch(`${API}/${username}/solved`)
     ]);
-    
+
     if (!calRes.ok || !statsRes.ok) throw new Error('API error');
-    
+
     const calData = await calRes.json();
     const stats = await statsRes.json();
 
-    // 1. UTC-Safe Key for India (5:30 AM reset)
     const now = new Date();
     const todayUTC = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 1000;
     const todayKey = todayUTC.toString();
 
-    // 2. Parse Calendar and Check Today
     const calendar = JSON.parse(calData.submissionCalendar || '{}');
     const todayCount = calendar[todayKey] || 0;
     const submittedToday = todayCount > 0;
@@ -63,12 +108,8 @@ async function fetchUserData(username) {
       easySolved: stats.easySolved || 0,
       mediumSolved: stats.mediumSolved || 0,
       hardSolved: stats.hardSolved || 0,
-      
-      // Note: The API often provides 'streak' inside the calData 
-      // but calculating it manually from the calendar is more reliable
-      streak: calData.streak || 0, 
+      streak: calData.streak || 0,
       totalActiveDays: calData.totalActiveDays || 0,
-      
       submittedToday,
       todayCount,
       lastUpdated: new Date().toLocaleTimeString('en-IN'),
@@ -286,7 +327,7 @@ function StatBox({ label, value, small }) {
 }
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
-function Dashboard({ users, penalty, penalties, onPenaltyChange, onReset }) {
+function Dashboard({ users, penalty, penalties, onPenaltyChange, onReset, syncing, autoPenaltyMsg, onDismissAlert }) {
   const [data, setData] = useState([null, null, null]);
   const [status, setStatus] = useState('');
   const [lastUpdated, setLastUpdated] = useState(null);
@@ -311,10 +352,35 @@ function Dashboard({ users, penalty, penalties, onPenaltyChange, onReset }) {
         <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 22, fontWeight: 700 }}>
           lc<span style={{ color: 'var(--accent)' }}>.</span>grind
         </div>
-        <div style={{ fontSize: 12, color: 'var(--muted2)', background: 'var(--surface)', border: '1px solid var(--border)', padding: '5px 12px', borderRadius: 20 }}>
-          {formatDate()}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {syncing && (
+            <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: "'JetBrains Mono', monospace" }}>
+              syncing...
+            </span>
+          )}
+          <div style={{ fontSize: 12, color: 'var(--muted2)', background: 'var(--surface)', border: '1px solid var(--border)', padding: '5px 12px', borderRadius: 20 }}>
+            {formatDate()}
+          </div>
         </div>
       </div>
+
+      {autoPenaltyMsg && (
+        <div style={{
+          background: 'var(--red-bg)', border: '1px solid var(--red-border)',
+          borderRadius: 10, padding: '10px 14px', marginBottom: '1rem',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+        }}>
+          <span style={{ fontSize: 13, color: 'var(--red)', fontFamily: "'JetBrains Mono', monospace" }}>
+            ⚠ {autoPenaltyMsg}
+          </span>
+          <button
+            onClick={onDismissAlert}
+            style={{ background: 'none', border: 'none', color: 'var(--red)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 0 }}
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: '1.5rem' }}>
         <SummaryCard label="total solved (combined)" value={totalSolved} />
@@ -412,12 +478,89 @@ function SummaryCard({ label, value, highlight, danger, text }) {
 
 // ── App Root ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const [appState, setAppState] = useState(() => loadFromStorage());
+  const [appState, setAppState] = useState(null);
+  const [initialized, setInitialized] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [autoPenaltyMsg, setAutoPenaltyMsg] = useState('');
+
+  useEffect(() => {
+    const local = loadFromStorage();
+
+    if (!local) {
+      setInitialized(true);
+      return;
+    }
+
+    // Render immediately from localStorage, then sync Firebase in background
+    setAppState(local);
+    setInitialized(true);
+    setSyncing(true);
+
+    (async () => {
+      const groupId = getGroupId(local.users);
+      const fbData = await loadFromFirebase(groupId);
+
+      // Firebase is source of truth for penalties
+      let state = local;
+      if (fbData) {
+        state = {
+          ...local,
+          penalties: fbData.penalties ?? local.penalties,
+          lastCheckedDate: fbData.lastCheckedDate,
+        };
+      }
+
+      const today = getTodayDateString();
+
+      // First run with Firebase — initialize date without running check
+      if (!state.lastCheckedDate) {
+        state = { ...state, lastCheckedDate: today };
+        await saveToFirebase(groupId, { users: state.users, penalty: state.penalty, penalties: state.penalties, lastCheckedDate: today });
+        saveToStorage(state);
+        setAppState(state);
+        setSyncing(false);
+        return;
+      }
+
+      // New day — check if anyone missed yesterday
+      if (state.lastCheckedDate !== today) {
+        const missed = await checkYesterdayMisses(state.users);
+        const newPenalties = [...(state.penalties || [0, 0, 0])];
+        const missedNames = [];
+
+        missed.forEach((m, i) => {
+          if (m) {
+            newPenalties[i] = (newPenalties[i] || 0) + 1;
+            missedNames.push(state.users[i]);
+          }
+        });
+
+        state = { ...state, penalties: newPenalties, lastCheckedDate: today };
+
+        if (missedNames.length > 0) {
+          setAutoPenaltyMsg(`Auto-penalty applied: ${missedNames.join(', ')} missed yesterday's submission`);
+        }
+
+        await saveToFirebase(groupId, {
+          users: state.users,
+          penalty: state.penalty,
+          penalties: newPenalties,
+          lastCheckedDate: today,
+        });
+        saveToStorage(state);
+      }
+
+      setAppState(state);
+      setSyncing(false);
+    })();
+  }, []);
 
   const handleStart = (users, penalty) => {
-    const newState = { users, penalty, penalties: [0, 0, 0] };
+    const today = getTodayDateString();
+    const newState = { users, penalty, penalties: [0, 0, 0], lastCheckedDate: today };
     setAppState(newState);
     saveToStorage(newState);
+    saveToFirebase(getGroupId(users), newState);
   };
 
   const handlePenaltyChange = (idx, delta) => {
@@ -426,18 +569,28 @@ export default function App() {
       penalties[idx] = Math.max(0, penalties[idx] + delta);
       const next = { ...prev, penalties };
       saveToStorage(next);
+      saveToFirebase(getGroupId(next.users), { penalties });
       return next;
     });
   };
 
   const handleReset = () => {
     if (window.confirm('Reset everything? This will clear all usernames and penalties.')) {
+      if (appState?.users) {
+        saveToFirebase(getGroupId(appState.users), {
+          penalties: [0, 0, 0],
+          lastCheckedDate: getTodayDateString(),
+        });
+      }
       localStorage.removeItem(STORAGE_KEY);
       setAppState(null);
+      setAutoPenaltyMsg('');
     }
   };
 
-  if (!appState || appState.users.length < 3) {
+  if (!initialized) return null;
+
+  if (!appState || appState.users?.length < 3) {
     return <SetupScreen onStart={handleStart} />;
   }
 
@@ -448,6 +601,9 @@ export default function App() {
       penalties={appState.penalties}
       onPenaltyChange={handlePenaltyChange}
       onReset={handleReset}
+      syncing={syncing}
+      autoPenaltyMsg={autoPenaltyMsg}
+      onDismissAlert={() => setAutoPenaltyMsg('')}
     />
   );
 }

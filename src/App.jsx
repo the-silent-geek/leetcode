@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { db } from './firebase';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, setDoc, collection, query, limit, getDocs } from 'firebase/firestore';
 
 const API = 'https://alfa-leetcode-api.onrender.com';
-const STORAGE_KEY = 'lc_grind_state';
+let activeDocId = null; // resolved from Firebase on first load
 const AVATAR_COLORS = [
   { bg: 'var(--blue-bg)', color: '#60a5fa' },
   { bg: 'var(--purple-bg)', color: '#a78bfa' },
@@ -21,10 +21,6 @@ function getYesterdayUTCKey() {
   return (Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) / 1000).toString();
 }
 
-function getGroupId(users) {
-  return [...users].sort().join('_').toLowerCase();
-}
-
 function formatDate() {
   return new Date().toLocaleDateString('en-IN', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
@@ -35,38 +31,45 @@ function getInitials(s) {
   return s.slice(0, 2).toUpperCase();
 }
 
-function loadFromStorage() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch { return null; }
-}
-
-function saveToStorage(state) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
-}
-
-async function loadFromFirebase(groupId) {
+async function loadFromFirebase() {
   if (!db) return null;
   try {
-    const snap = await getDoc(doc(db, 'groups', groupId));
-    return snap.exists() ? snap.data() : null;
+    const qSnap = await getDocs(query(collection(db, 'groups'), limit(1)));
+    if (qSnap.empty) return null;
+    const first = qSnap.docs[0];
+    activeDocId = first.id;
+    return first.data();
   } catch (e) {
     console.error('Firebase load error:', e);
     return null;
   }
 }
 
-async function saveToFirebase(groupId, data) {
-  if (!db) return;
+async function saveToFirebase(data) {
+  if (!db || !activeDocId) return;
   try {
-    await setDoc(doc(db, 'groups', groupId), data, { merge: true });
+    await setDoc(doc(db, 'groups', activeDocId), data, { merge: true });
   } catch (e) {
     console.error('Firebase save error:', e);
   }
 }
 
-// Returns boolean[] — true means user missed yesterday
+function calculateCurrentStreak(calendar) {
+  const now = new Date();
+  const todayUTC = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 1000);
+  const DAY = 86400;
+
+  let day = todayUTC;
+  if (!(calendar[day] > 0)) day -= DAY;
+
+  let streak = 0;
+  while (calendar[day] > 0) {
+    streak++;
+    day -= DAY;
+  }
+  return streak;
+}
+
 async function checkYesterdayMisses(users) {
   const yesterdayKey = getYesterdayUTCKey();
   return Promise.all(users.map(async (username) => {
@@ -95,12 +98,10 @@ async function fetchUserData(username) {
     const stats = await statsRes.json();
 
     const now = new Date();
-    const todayUTC = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 1000;
-    const todayKey = todayUTC.toString();
+    const todayKey = (Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 1000).toString();
 
     const calendar = JSON.parse(calData.submissionCalendar || '{}');
     const todayCount = calendar[todayKey] || 0;
-    const submittedToday = todayCount > 0;
 
     return {
       username,
@@ -108,9 +109,9 @@ async function fetchUserData(username) {
       easySolved: stats.easySolved || 0,
       mediumSolved: stats.mediumSolved || 0,
       hardSolved: stats.hardSolved || 0,
-      streak: calData.streak || 0,
+      streak: calculateCurrentStreak(calendar),
       totalActiveDays: calData.totalActiveDays || 0,
-      submittedToday,
+      submittedToday: todayCount > 0,
       todayCount,
       lastUpdated: new Date().toLocaleTimeString('en-IN'),
       error: null,
@@ -126,100 +127,10 @@ async function fetchUserData(username) {
 }
 
 
-// ── Setup Screen ──────────────────────────────────────────────────────────────
-function SetupScreen({ onStart }) {
-  const [users, setUsers] = useState(['', '', '']);
-  const [penalty, setPenalty] = useState('');
-  const [error, setError] = useState('');
-
-  const handleStart = () => {
-    if (users.some(u => !u.trim())) { setError('Please enter all 3 LeetCode usernames'); return; }
-    setError('');
-    onStart(users.map(u => u.trim()), penalty.trim() || 'buy chai for the group');
-  };
-
-  return (
-    <div style={{ maxWidth: 480, margin: '0 auto', padding: '4rem 1rem' }}>
-      <div style={{ textAlign: 'center', marginBottom: '2.5rem' }}>
-        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 28, fontWeight: 700, color: '#e8e8f0', marginBottom: 8 }}>
-          lc<span style={{ color: 'var(--accent)' }}>.</span>grind
-        </div>
-        <div style={{ fontSize: 14, color: 'var(--muted2)', lineHeight: 1.6 }}>
-          accountability tracker for you and your friends<br />
-          submit daily or face the consequences
-        </div>
-      </div>
-
-      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: '1.75rem' }}>
-        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 2, color: 'var(--muted)', textTransform: 'uppercase', marginBottom: '1.25rem' }}>
-          Setup your squad
-        </div>
-
-        {['Player 1', 'Player 2', 'Player 3'].map((label, i) => (
-          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-            <div style={{
-              width: 32, height: 32, borderRadius: '50%', flexShrink: 0,
-              background: AVATAR_COLORS[i].bg, color: AVATAR_COLORS[i].color,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 11, fontWeight: 700
-            }}>
-              {i + 1}
-            </div>
-            <input
-              type="text"
-              value={users[i]}
-              onChange={e => setUsers(u => { const n = [...u]; n[i] = e.target.value; return n; })}
-              placeholder={`${label} — leetcode username`}
-              style={{
-                flex: 1, background: 'var(--surface2)', border: '1px solid var(--border)',
-                borderRadius: 8, padding: '9px 12px', color: 'var(--text)', fontSize: 14,
-                fontFamily: "'JetBrains Mono', monospace", outline: 'none',
-              }}
-              onKeyDown={e => e.key === 'Enter' && handleStart()}
-            />
-          </div>
-        ))}
-
-        <div style={{ height: 1, background: 'var(--border)', margin: '1rem 0' }} />
-
-        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 2, color: 'var(--muted)', textTransform: 'uppercase', marginBottom: 8 }}>
-          Penalty for missing a day
-        </div>
-        <input
-          type="text"
-          value={penalty}
-          onChange={e => setPenalty(e.target.value)}
-          placeholder="e.g. buy chai, ₹50, 20 pushups"
-          style={{
-            width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)',
-            borderRadius: 8, padding: '9px 12px', color: 'var(--text)', fontSize: 14,
-            outline: 'none', marginBottom: 4
-          }}
-          onKeyDown={e => e.key === 'Enter' && handleStart()}
-        />
-
-        {error && <div style={{ fontSize: 12, color: 'var(--red)', margin: '8px 0', fontFamily: "'JetBrains Mono', monospace" }}>{error}</div>}
-
-        <button
-          onClick={handleStart}
-          style={{
-            width: '100%', marginTop: 16, padding: '12px', background: 'var(--accent)',
-            color: '#0a0a0f', border: 'none', borderRadius: 10, fontSize: 14,
-            fontWeight: 700, cursor: 'pointer', letterSpacing: 0.5,
-          }}
-        >
-          Start tracking →
-        </button>
-      </div>
-    </div>
-  );
-}
-
 // ── Player Card ───────────────────────────────────────────────────────────────
-function PlayerCard({ user, data, index, penalty, penalties, onAddPenalty, onRemovePenalty }) {
+function PlayerCard({ user, data, index, groupPenalty, penalties, onAddPenalty, onRemovePenalty }) {
   const av = AVATAR_COLORS[index];
   const isSubmitted = data && !data.error && data.submittedToday;
-  const isMissed = data && !data.error && !data.submittedToday;
 
   const borderColor = !data ? 'var(--border)'
     : data.error ? 'var(--border)'
@@ -299,7 +210,7 @@ function PlayerCard({ user, data, index, penalty, penalties, onAddPenalty, onRem
           {penalties} miss{penalties !== 1 ? 'es' : ''}
         </span>
         <span style={{ fontSize: 11, color: 'var(--muted)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          × {penalty}
+          × {groupPenalty}
         </span>
       </div>
     </div>
@@ -325,14 +236,14 @@ function StatBox({ label, value, small }) {
 }
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
-function Dashboard({ users, penalty, penalties, onPenaltyChange, onReset, syncing, autoPenaltyMsg, onDismissAlert }) {
-  const [data, setData] = useState([null, null, null]);
+function Dashboard({ users, penalty, penalties, onPenaltyChange, onReset, autoPenaltyMsg, onDismissAlert }) {
+  const [data, setData] = useState(users.map(() => null));
   const [status, setStatus] = useState('');
   const [lastUpdated, setLastUpdated] = useState(null);
 
   const refresh = useCallback(async () => {
     setStatus('fetching live data...');
-    setData([null, null, null]);
+    setData(users.map(() => null));
     const results = await Promise.all(users.map(u => fetchUserData(u)));
     setData(results);
     setLastUpdated(new Date());
@@ -343,6 +254,7 @@ function Dashboard({ users, penalty, penalties, onPenaltyChange, onReset, syncin
 
   const totalSolved = data.reduce((sum, d) => sum + (d && !d.error ? d.totalSolved : 0), 0);
   const submittedCount = data.filter(d => d && !d.error && d.submittedToday).length;
+  const totalPenalties = penalties.reduce((a, b) => a + b, 0);
 
   return (
     <div style={{ maxWidth: 860, margin: '0 auto', padding: '1.5rem 1rem 3rem' }}>
@@ -350,15 +262,8 @@ function Dashboard({ users, penalty, penalties, onPenaltyChange, onReset, syncin
         <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 22, fontWeight: 700 }}>
           lc<span style={{ color: 'var(--accent)' }}>.</span>grind
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          {syncing && (
-            <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: "'JetBrains Mono', monospace" }}>
-              syncing...
-            </span>
-          )}
-          <div style={{ fontSize: 12, color: 'var(--muted2)', background: 'var(--surface)', border: '1px solid var(--border)', padding: '5px 12px', borderRadius: 20 }}>
-            {formatDate()}
-          </div>
+        <div style={{ fontSize: 12, color: 'var(--muted2)', background: 'var(--surface)', border: '1px solid var(--border)', padding: '5px 12px', borderRadius: 20 }}>
+          {formatDate()}
         </div>
       </div>
 
@@ -382,9 +287,9 @@ function Dashboard({ users, penalty, penalties, onPenaltyChange, onReset, syncin
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: '1.5rem' }}>
         <SummaryCard label="total solved (combined)" value={totalSolved} />
-        <SummaryCard label="submitted today" value={`${submittedCount} / 3`} highlight={submittedCount === 3} />
+        <SummaryCard label="submitted today" value={`${submittedCount} / ${users.length}`} highlight={submittedCount === users.length} />
         <SummaryCard label="penalty" value={penalty} text />
-        <SummaryCard label="total penalties" value={penalties.reduce((a, b) => a + b, 0)} danger={penalties.reduce((a, b) => a + b, 0) > 0} />
+        <SummaryCard label="total penalties" value={totalPenalties} danger={totalPenalties > 0} />
       </div>
 
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: '1.25rem', flexWrap: 'wrap' }}>
@@ -409,7 +314,7 @@ function Dashboard({ users, penalty, penalties, onPenaltyChange, onReset, syncin
           onClick={onReset}
           style={{ marginLeft: 'auto', padding: '8px 14px', background: 'transparent', color: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12, cursor: 'pointer' }}
         >
-          Reset
+          Reset penalties
         </button>
       </div>
 
@@ -420,7 +325,7 @@ function Dashboard({ users, penalty, penalties, onPenaltyChange, onReset, syncin
             user={user}
             data={data[i]}
             index={i}
-            penalty={penalty}
+            groupPenalty={penalty}
             penalties={penalties[i]}
             onAddPenalty={() => onPenaltyChange(i, 1)}
             onRemovePenalty={() => onPenaltyChange(i, -1)}
@@ -433,13 +338,14 @@ function Dashboard({ users, penalty, penalties, onPenaltyChange, onReset, syncin
         {[...users.map((u, i) => ({ user: u, solved: data[i]?.totalSolved || 0, streak: data[i]?.streak || 0, index: i }))]
           .sort((a, b) => b.solved - a.solved)
           .map((p, rank) => (
-            <div key={p.user} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: rank < 2 ? '1px solid var(--border)' : 'none' }}>
+            <div key={p.user} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: rank < users.length - 1 ? '1px solid var(--border)' : 'none' }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: rank === 0 ? 'var(--accent)' : 'var(--muted)', width: 20, fontFamily: "'JetBrains Mono', monospace" }}>
                 #{rank + 1}
               </div>
               <div style={{
                 width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
-                background: AVATAR_COLORS[p.index].bg, color: AVATAR_COLORS[p.index].color,
+                background: AVATAR_COLORS[p.index % AVATAR_COLORS.length].bg,
+                color: AVATAR_COLORS[p.index % AVATAR_COLORS.length].color,
                 display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 700,
               }}>
                 {getInitials(p.user)}
@@ -476,130 +382,101 @@ function SummaryCard({ label, value, highlight, danger, text }) {
 
 // ── App Root ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const [appState, setAppState] = useState(null);
-  const [initialized, setInitialized] = useState(false);
-  const [syncing, setSyncing] = useState(false);
+  const [group, setGroup] = useState(null);   // { users, penalty, penalties, lastCheckedDate }
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [autoPenaltyMsg, setAutoPenaltyMsg] = useState('');
 
   useEffect(() => {
-    const local = loadFromStorage();
-
-    if (!local) {
-      setInitialized(true);
-      return;
-    }
-
-    // Render immediately from localStorage, then sync Firebase in background
-    setAppState(local);
-    setInitialized(true);
-    setSyncing(true);
-
     (async () => {
-      const groupId = getGroupId(local.users);
-      const fbData = await loadFromFirebase(groupId);
+      const fbData = await loadFromFirebase();
 
-      // Firebase is source of truth for penalties
-      let state = local;
-      if (fbData) {
-        state = {
-          ...local,
-          penalties: fbData.penalties ?? local.penalties,
-          lastCheckedDate: fbData.lastCheckedDate,
-        };
-      }
-
-      const today = getTodayDateString();
-
-      // First run with Firebase — initialize date without running check
-      if (!state.lastCheckedDate) {
-        state = { ...state, lastCheckedDate: today };
-        await saveToFirebase(groupId, { users: state.users, penalty: state.penalty, penalties: state.penalties, lastCheckedDate: today });
-        saveToStorage(state);
-        setAppState(state);
-        setSyncing(false);
+      if (!fbData || !fbData.users || fbData.users.length === 0) {
+        setError('No group configured in Firebase. Create a document at groups/main with fields: users (array), penalty (string).');
+        setLoading(false);
         return;
       }
 
-      // New day — check if anyone missed yesterday
-      if (state.lastCheckedDate !== today) {
-        const missed = await checkYesterdayMisses(state.users);
-        const newPenalties = [...(state.penalties || [0, 0, 0])];
+      let penalties = fbData.penalties ?? fbData.users.map(() => 0);
+      const today = getTodayDateString();
+
+      if (!fbData.lastCheckedDate) {
+        // First run — just initialize the date
+        await saveToFirebase({ penalties, lastCheckedDate: today });
+      } else if (fbData.lastCheckedDate !== today) {
+        // New day — check if anyone missed yesterday
+        const missed = await checkYesterdayMisses(fbData.users);
+        const newPenalties = [...penalties];
         const missedNames = [];
 
         missed.forEach((m, i) => {
           if (m) {
-            newPenalties[i] = (newPenalties[i] || 0) + 1;
-            missedNames.push(state.users[i]);
+            newPenalties[i]++;
+            missedNames.push(fbData.users[i]);
           }
         });
 
-        state = { ...state, penalties: newPenalties, lastCheckedDate: today };
+        penalties = newPenalties;
 
         if (missedNames.length > 0) {
           setAutoPenaltyMsg(`Auto-penalty applied: ${missedNames.join(', ')} missed yesterday's submission`);
         }
 
-        await saveToFirebase(groupId, {
-          users: state.users,
-          penalty: state.penalty,
-          penalties: newPenalties,
-          lastCheckedDate: today,
-        });
-        saveToStorage(state);
+        await saveToFirebase({ penalties, lastCheckedDate: today });
       }
 
-      setAppState(state);
-      setSyncing(false);
+      setGroup({ ...fbData, penalties });
+      setLoading(false);
     })();
   }, []);
 
-  const handleStart = (users, penalty) => {
-    const today = getTodayDateString();
-    const newState = { users, penalty, penalties: [0, 0, 0], lastCheckedDate: today };
-    setAppState(newState);
-    saveToStorage(newState);
-    saveToFirebase(getGroupId(users), newState);
-  };
-
   const handlePenaltyChange = (idx, delta) => {
-    setAppState(prev => {
+    setGroup(prev => {
       const penalties = [...prev.penalties];
       penalties[idx] = Math.max(0, penalties[idx] + delta);
-      const next = { ...prev, penalties };
-      saveToStorage(next);
-      saveToFirebase(getGroupId(next.users), { penalties });
-      return next;
+      saveToFirebase({ penalties });
+      return { ...prev, penalties };
     });
   };
 
   const handleReset = () => {
-    if (window.confirm('Reset everything? This will clear all usernames and penalties.')) {
-      if (appState?.users) {
-        saveToFirebase(getGroupId(appState.users), {
-          penalties: [0, 0, 0],
-          lastCheckedDate: getTodayDateString(),
-        });
-      }
-      localStorage.removeItem(STORAGE_KEY);
-      setAppState(null);
+    if (window.confirm('Reset all penalties to zero?')) {
+      const zeroed = group.users.map(() => 0);
+      setGroup(prev => ({ ...prev, penalties: zeroed }));
+      saveToFirebase({ penalties: zeroed, lastCheckedDate: getTodayDateString() });
       setAutoPenaltyMsg('');
     }
   };
 
-  if (!initialized) return null;
+  if (loading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
+        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: 'var(--muted)' }}>
+          loading...
+        </span>
+      </div>
+    );
+  }
 
-  if (!appState || appState.users?.length < 3) {
-    return <SetupScreen onStart={handleStart} />;
+  if (error) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', padding: '2rem' }}>
+        <div style={{ maxWidth: 480, textAlign: 'center' }}>
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: 'var(--red)', lineHeight: 1.7 }}>
+            {error}
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
     <Dashboard
-      users={appState.users}
-      penalty={appState.penalty}
-      penalties={appState.penalties}
+      users={group.users}
+      penalty={group.penalty}
+      penalties={group.penalties}
       onPenaltyChange={handlePenaltyChange}
       onReset={handleReset}
-      syncing={syncing}
       autoPenaltyMsg={autoPenaltyMsg}
       onDismissAlert={() => setAutoPenaltyMsg('')}
     />

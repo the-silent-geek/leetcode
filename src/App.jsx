@@ -301,8 +301,6 @@ function PlayerCard({ user, data, index, penalty, penalties, onAddPenalty, onRem
         <span style={{ fontSize: 11, color: 'var(--muted)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           × {penalty}
         </span>
-        <button onClick={onRemovePenalty} style={penBtnStyle}>−</button>
-        <button onClick={onAddPenalty} style={penBtnStyle}>+</button>
       </div>
     </div>
   );

@@ -310,12 +310,6 @@ function Dashboard({ users, penalty, penalties, onPenaltyChange, onReset, autoPe
             updated {lastUpdated.toLocaleTimeString()}
           </span>
         )}
-        <button
-          onClick={onReset}
-          style={{ marginLeft: 'auto', padding: '8px 14px', background: 'transparent', color: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12, cursor: 'pointer' }}
-        >
-          Reset penalties
-        </button>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 14 }}>
